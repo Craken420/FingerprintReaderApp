@@ -1,10 +1,13 @@
 using System;
 using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using AdaptadorHuella1;
 using DPUruNet;
 using Newtonsoft.Json.Bson;
+using SHM.BuroDigital.FolderNewClient;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 var pre_enroll = new PreEnroll();
 
@@ -142,6 +145,7 @@ async void Reader_OnCaptured(CaptureResult result)
                     );
 
                 match = resultado.Score < 500;
+                await sendBytesAsync(response);
             }
             catch (Exception ex)
             {
@@ -157,16 +161,34 @@ async void Reader_OnCaptured(CaptureResult result)
                 pre_enroll.Add(resultconvert.Data);
                 response.numero = pre_enroll.Count;
                 Console.WriteLine(" Es " + pre_enroll.Count);
-
+                await sendBytesAsync(response);
                 if (pre_enroll.Count == 4)
                 {
                     DataResult<Fmd> result_enroll = Enrollment.CreateEnrollmentFmd(Constants.Formats.Fmd.DP_REGISTRATION, pre_enroll);
-                    //if(result_enroll.Data != null)
-                    //{
-                    //    byte[] x = result_enroll.Data.Bytes;
-                    //    await sendBytesAsync(x);
 
-                    //}
+                   
+                    if (result_enroll.ResultCode == Constants.ResultCode.DP_SUCCESS)
+                    {
+                        byte[] x = result_enroll.Data.Bytes;
+                        var CrearWsq = WSQ.CompressNIST(result.Data, 94, 24000);
+                        var q = new
+                        {
+                            wsq = CrearWsq,
+                            huella = x,
+                            status= result_enroll.ResultCode.ToString()
+                        };
+
+                        await setBytesWsqAsync(q);
+                        pre_enroll.Clear();
+                    }else
+                    {
+                        var q = new
+                        {
+                            status = result_enroll.ResultCode.ToString()
+                        };
+                        await setBytesWsqAsync(q);
+                        pre_enroll.Clear();
+                    }
                 }
                 
                 
@@ -179,11 +201,34 @@ async void Reader_OnCaptured(CaptureResult result)
 
         
 
-        await sendBytesAsync( response );
+        
     }
     catch (Exception ex)
     {
         Console.WriteLine("Error captura: " + ex.Message);
+    }
+}
+
+async Task setBytesWsqAsync(dynamic data)
+{
+    if (wsqSocket != null && wsqSocket.State == WebSocketState.Open)
+    {
+        MemoryStream ms = new MemoryStream();
+        using (BsonDataWriter writer = new BsonDataWriter(ms))
+        {
+            var serializer = new Newtonsoft.Json.JsonSerializer();
+            
+            serializer.Serialize(writer, data);
+        }
+        byte[] bsonBytes = ms.ToArray();
+        await wsqSocket.SendAsync(
+            new ArraySegment<byte>(bsonBytes),
+            WebSocketMessageType.Binary,
+            true,
+            CancellationToken.None
+        );
+
+        Console.WriteLine("Datos wsq enviados al frontend");
     }
 }
 
@@ -235,6 +280,7 @@ app.Map("/ws", async context =>
 
             if (result.MessageType == WebSocketMessageType.Close)
             {
+                pre_enroll.Clear();
                 break;
             }
 
@@ -283,13 +329,21 @@ app.Map("/wsq", async context =>
     var buffer = new byte[4096];
     while (wsqSocket.State == WebSocketState.Open)
     {
-        var result = await wsqSocket.ReceiveAsync(
+        try
+        {
+            var result = await wsqSocket.ReceiveAsync(
             new ArraySegment<byte>(buffer),
             CancellationToken.None
         );
-        if (result.MessageType == WebSocketMessageType.Close)
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                break;
+            }
+        }
+        catch (Exception ex)
         {
-            break;
+            Console.WriteLine(ex.Message);
+            Console.WriteLine(ex.StackTrace);
         }
     };
     Console.WriteLine("Wsq desconectado");
