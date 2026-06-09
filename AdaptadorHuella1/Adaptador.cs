@@ -4,7 +4,7 @@ using SixLabors.ImageSharp;
 using System.Collections;
 using SixLabors.ImageSharp.Processing;
 
-namespace AdaptadorHuella1
+namespace AdaptadorHuella
 {
     public enum Modo
     {
@@ -12,8 +12,29 @@ namespace AdaptadorHuella1
         MATCH,
     };
 
-    public class AdaptadorHuella
+    public enum ActionClient
     {
+        ON_CAPTURED_MATCH,
+        ON_CAPTURED_CAPTURA,
+        SYNC_ESTADO,
+        PONG
+    }
+    public struct ToDb
+    {
+        public bool correcto;
+        public bool lol;
+        public string mensaje;
+    }
+    public class Adaptador
+    {
+        public static bool HayLector()
+        {
+            foreach (Reader R in ReaderCollection.GetReaders())
+            {
+                return true;
+            }
+            return false;
+        }
         public static byte[] CreateBitmap(byte[] bytes, int width, int height)
         {
             // Crear una nueva imagen con el formato Rgb24 (24 bits por píxel, RGB)  
@@ -50,6 +71,60 @@ namespace AdaptadorHuella1
             }
         }
 
+        public static ToDb ToDB(CaptureResult result)
+        { //Captura de huella de cliente nuevo
+            var data = new ToDb();
+            
+            var feature = FeatureExtraction.CreateFmdFromFid(result.Data as Fid, Constants.Formats.Fmd.ANSI);
+            if (feature != null)
+            {
+                DataResult<Fmd> actual = FeatureExtraction.CreateFmdFromFid(result.Data as Fid, Constants.Formats.Fmd.ANSI);
+                CompareResult Result_Finger = Comparison.Compare(feature.Data, 0, actual.Data, 0);
+
+                if (Result_Finger.Score > 500)
+                {
+                    data.lol = false;
+                }
+            }
+
+            
+
+            NFIQ.NFIQ_SCORE score = NFIQ.GetScore(result.Data as Fid, NFIQ.NFIQ_ALGORITHM.NFIQ_NIST);
+
+            switch (score)
+            {
+                case NFIQ.NFIQ_SCORE.EXCELLENT:
+
+                    data.correcto = true;
+                    data.mensaje = "Huella excelente.";
+                    break;
+                case NFIQ.NFIQ_SCORE.GOOD:
+                    data.correcto = true;
+                    data.mensaje = "Huella aceptable.";
+                    break;
+                default:
+                    data.mensaje = "Esta huella no cumple con la calidad requerida, Intente de nuevo";
+                    break;
+            }
+            return data;
+        }
+
+        public static bool ExisteHuellaSimilar(CaptureResult result, byte[] HuellaCliente)
+        {
+            
+            DataResult<Fmd> BaseDatos = Importer.ImportFmd(HuellaCliente, Constants.Formats.Fmd.DP_REGISTRATION, Constants.Formats.Fmd.DP_REGISTRATION);
+            DataResult<Fmd> Actual = FeatureExtraction.CreateFmdFromFid(result.Data as Fid, Constants.Formats.Fmd.ISO);
+            CompareResult ResultFinger = Comparison.Compare(Actual.Data, 0, BaseDatos.Data, 0);
+
+
+            NFIQ.NFIQ_SCORE score = NFIQ.GetScore(result.Data as Fid, NFIQ.NFIQ_ALGORITHM.NFIQ_NIST);
+
+            if (ResultFinger.Score < 2147483)
+            {
+                return true;
+            }
+            return false;
+        }
     }
 
     internal class ResponseBody
@@ -66,8 +141,14 @@ namespace AdaptadorHuella1
         public byte[] Lectura { get; set; }
 
         public byte[] Imagen { get; set; }
-
+        /*
+         * en modo capture indica el número d huella capturada
+         */
         public int numero { get; set; }
+        /*
+         * enviar mensaje al cliente
+         */
+        public string mensaje { get; set; }
     }
 
     internal class PreEnroll : System.Collections.Generic.IList<Fmd>

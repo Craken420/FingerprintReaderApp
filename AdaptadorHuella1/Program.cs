@@ -1,13 +1,16 @@
-using System;
+﻿using System;
 using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using AdaptadorHuella1;
+using AdaptadorHuella;
 using DPUruNet;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Bson;
+using Newtonsoft.Json.Linq;
 using SHM.BuroDigital.FolderNewClient;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+using AdaptadorHuella1;
+using Microsoft.Win32;
 
 var pre_enroll = new PreEnroll();
 
@@ -20,13 +23,43 @@ WebSocket? currentSocket = null;
 WebSocket? wsqSocket = null;
 List<Reader> lectores = new();
 
-string huellaCliente = "";
+dynamic? huellaCliente = null;
 Modo modo = Modo.CAPTURA;
+
+var messageHandlers = new Dictionary<string, Action<WebSocket, JObject>>
+{
+    ["huellaCliente"] = (ws, payload) => {
+        huellaCliente = payload["huella"];
+        System.Diagnostics.Debug.WriteLine("Huella clliente esptablecida");
+    },
+    
+    ["ping"] = async (ws, payload) => {
+        var haylector = Adaptador.HayLector();
+        var data = new
+        {
+            type = "pong",
+            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            haylector = haylector
+        };
+        await sendBytesAsync(ActionClient.PONG, data);
+    },
+    ["capture"] = (ws, payload) => {
+        modo = Modo.CAPTURA;
+        Console.WriteLine("Modo CAPTURA activado");
+        System.Diagnostics.Debug.WriteLine("Modo CAPTURA activado");
+    },
+    ["match"] = (ws, payload) => {
+        modo = Modo.MATCH;
+        huellaCliente = payload["huella"]?.ToString() ?? "";
+        Console.WriteLine("Modo MATCH activado");
+    }
+};
 
 Console.WriteLine("=================================");
 Console.WriteLine("Adaptador Huella iniciado");
 Console.WriteLine("WebSocket: ws://localhost:5000/ws");
 Console.WriteLine("=================================");
+
 
 InitReader();
 
@@ -38,7 +71,7 @@ void InitReader()
 
         if (readerCollection.Count == 0)
         {
-            Console.WriteLine("No se encontr� lector.");
+            Console.WriteLine("No se encontró lector.");
             return;
         }
 
@@ -82,7 +115,7 @@ async void Reader_OnCaptured(CaptureResult result)
         Console.WriteLine("Huella capturada");
 
         var fid = result.Data;
-
+        
         int score = Quality.NfiqFid(
             fid,
             0,
@@ -101,7 +134,7 @@ async void Reader_OnCaptured(CaptureResult result)
         //await sendBytesAsync(raw);
         //return;
 
-        var imagen = AdaptadorHuella.CreateBitmap(raw, fid.Views[0].Width, fid.Views[0].Height);
+        var imagen = Adaptador.CreateBitmap(raw, fid.Views[0].Width, fid.Views[0].Height);
 
         //System.IO.File.WriteAllText("File.txt", lectura);
         bool match = false;
@@ -117,85 +150,117 @@ async void Reader_OnCaptured(CaptureResult result)
             numero = 0
         };
 
-        if (modo == Modo.MATCH && !string.IsNullOrEmpty(huellaCliente))
+        if (modo == Modo.MATCH)
         {
-            try
+            if(huellaCliente != null)
             {
-                byte[] baHuella = Convert.FromBase64String(huellaCliente);
+                try
+                {
+                    byte[] baHuella = huellaCliente;
 
-                DataResult<Fmd> HuellaBD =
-                    Importer.ImportFmd(
-                        baHuella,
-                        Constants.Formats.Fmd.DP_REGISTRATION,
-                        Constants.Formats.Fmd.DP_REGISTRATION
-                    );
+                    DataResult<Fmd> HuellaBD =
+                        Importer.ImportFmd(
+                            baHuella,
+                            Constants.Formats.Fmd.DP_REGISTRATION,
+                            Constants.Formats.Fmd.DP_REGISTRATION
+                        );
 
-                DataResult<Fmd> Actual =
-                    FeatureExtraction.CreateFmdFromFid(
-                        fid,
-                        Constants.Formats.Fmd.ISO
-                    );
+                    DataResult<Fmd> Actual =
+                        FeatureExtraction.CreateFmdFromFid(
+                            fid,
+                            Constants.Formats.Fmd.ISO
+                        );
 
-                CompareResult resultado =
-                    Comparison.Compare(
-                        Actual.Data,
-                        0,
-                        HuellaBD.Data,
-                        0
-                    );
+                    CompareResult resultado =
+                        Comparison.Compare(
+                            Actual.Data,
+                            0,
+                            HuellaBD.Data,
+                            0
+                        );
 
-                match = resultado.Score < 500;
-                await sendBytesAsync(response);
-            }
-            catch (Exception ex)
+                    match = resultado.Score < 500;
+                    await sendBytesAsync( ActionClient.ON_CAPTURED_MATCH, response);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error comparación: " + ex.Message);
+                }
+            } else
             {
-                Console.WriteLine("Error comparaci�n: " + ex.Message);
+                response.mensaje = "El cliente no tiene huela para maatch";
+
             }
         }
         else if (modo == Modo.CAPTURA)
         {
             try
             {
-                //VerificarHuellListNegr(result);
-                DataResult<Fmd> resultconvert = FeatureExtraction.CreateFmdFromFid(result.Data, Constants.Formats.Fmd.DP_PRE_REGISTRATION);
-                pre_enroll.Add(resultconvert.Data);
-                response.numero = pre_enroll.Count;
-                Console.WriteLine(" Es " + pre_enroll.Count);
-                await sendBytesAsync(response);
-                if (pre_enroll.Count == 4)
+                //dynamic otro = Adaptador.ToDB(result);
+                var otro = new ToDb()
                 {
-                    DataResult<Fmd> result_enroll = Enrollment.CreateEnrollmentFmd(Constants.Formats.Fmd.DP_REGISTRATION, pre_enroll);
+                    lol = true,
+                    correcto = true,
+                    mensaje = "Huella excelente"
+                };
+                response.mensaje = otro.mensaje;
+                if (otro.correcto && otro.lol)
+                {
 
-                   
-                    if (result_enroll.ResultCode == Constants.ResultCode.DP_SUCCESS)
+                    //VerificarHuellListNegr(result);
+                    DataResult<Fmd> resultconvert = FeatureExtraction.CreateFmdFromFid(result.Data, Constants.Formats.Fmd.DP_PRE_REGISTRATION);
+                    pre_enroll.Add(resultconvert.Data);
+                    response.numero = pre_enroll.Count;
+                    Console.WriteLine(" Es " + pre_enroll.Count);
+                    bool encontrado = false;
+                    if (huellaCliente != null)
                     {
-                        byte[] x = result_enroll.Data.Bytes;
-                        var CrearWsq = WSQ.CompressNIST(result.Data, 94, 24000);
-                        var q = new
-                        {
-                            wsq = CrearWsq,
-                            huella = x,
-                            status= result_enroll.ResultCode.ToString()
-                        };
+                        encontrado = Adaptador.ExisteHuellaSimilar(result, (byte[])huellaCliente);
+                        if (encontrado)
+                            response.mensaje = "La huella coincide con la que se registro anteriormente";
+                    }
+                    response.match = encontrado;
+                    await sendBytesAsync(ActionClient.ON_CAPTURED_CAPTURA, response);
+                    if (encontrado == false && pre_enroll.Count == 4)
+                    {
+                        DataResult<Fmd> result_enroll = Enrollment.CreateEnrollmentFmd(Constants.Formats.Fmd.DP_REGISTRATION, pre_enroll);
 
-                        await setBytesWsqAsync(q);
-                        pre_enroll.Clear();
-                    }else
-                    {
-                        var q = new
+
+                        if (result_enroll.ResultCode == Constants.ResultCode.DP_SUCCESS)
                         {
-                            status = result_enroll.ResultCode.ToString()
-                        };
-                        await setBytesWsqAsync(q);
-                        pre_enroll.Clear();
+                            byte[] x = result_enroll.Data.Bytes;
+                            var CrearWsq = WSQ.CompressNIST(result.Data, 94, 24000);
+                            var q = new
+                            {
+                                wsq = CrearWsq,
+                                huella = x,
+                                status = result_enroll.ResultCode.ToString()
+                            };
+
+                            await setBytesWsqAsync(q);
+                            pre_enroll.Clear();
+                        } else
+                        {
+                            var q = new
+                            {
+                                status = result_enroll.ResultCode.ToString()
+                            };
+                            await setBytesWsqAsync(q);
+                            pre_enroll.Clear();
+                        }
                     }
                 }
-                
-                
+                else
+                {
+                    await sendBytesAsync(ActionClient.ON_CAPTURED_CAPTURA, response);
+                }
+
             }
             catch (Exception ex)
             {
                 Console.WriteLine(ex.Message);
+                System.Diagnostics.Debug.WriteLine(ex.Message);
+                System.Diagnostics.Debug.WriteLine(ex.StackTrace);
             }
         }
 
@@ -232,15 +297,21 @@ async Task setBytesWsqAsync(dynamic data)
     }
 }
 
-async Task sendBytesAsync(dynamic data )
+async Task sendBytesAsync(ActionClient action, dynamic data )
 {
     if (currentSocket != null && currentSocket.State == WebSocketState.Open)
     {
+        Console.WriteLine("SendByteAsync: ", action);
         MemoryStream ms = new MemoryStream();
+        var p = new
+        {
+            type = action.ToString(),
+            payload = data
+        };
         using (BsonDataWriter writer = new BsonDataWriter(ms))
         {
             var serializer = new Newtonsoft.Json.JsonSerializer();
-            serializer.Serialize(writer, data);
+            serializer.Serialize(writer, p);
         }
         byte[] bsonBytes = ms.ToArray();
         await currentSocket.SendAsync(
@@ -281,33 +352,50 @@ app.Map("/ws", async context =>
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 pre_enroll.Clear();
+                Console.WriteLine("👉👉Conexión cerrada");
                 break;
             }
 
-            var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-
-            Console.WriteLine("Mensaje frontend: " + message);
-            var json = JsonDocument.Parse(message);
-
-            var type = json.RootElement.GetProperty("type").GetString();
-
-            if (type == "capture")
+            if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary)
             {
-                modo = Modo.CAPTURA;
-                Console.WriteLine("Modo CAPTURA activado");
-            }
+                System.Diagnostics.Debug.WriteLine("👉MessageType:" + result.MessageType);
 
-            if (type == "match")
-            {
-                modo = Modo.MATCH;
-                huellaCliente = json.RootElement
-                    .GetProperty("huella")
-                    .GetString();
+                JObject json;
 
-                Console.WriteLine("Modo MATCH activado");
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    Console.WriteLine("Mensaje frontend: " + message);
+                    json = JObject.Parse(message);
+                }
+                else
+                {
+                    using var stream = new MemoryStream(buffer, 0, result.Count);
+                    using var bsonReader = new BsonDataReader(stream);
+                    json = JObject.Load(bsonReader);
+                }
+
+                var type = json["type"]?.ToString();
+                var payload = (JObject)json["payload"]!;
+                System.Diagnostics.Debug.WriteLine("🎁🎁TYPE:" + type);
+                if (messageHandlers.TryGetValue(type!, out var handler))
+                {
+                    //manejar el mensaje solicituado
+                    handler(currentSocket, payload);
+                    
+                }
+                else
+                {
+                    Console.WriteLine($"Tipo de mensaje no reconocido: {type}");
+                }
             }
         }
-        catch
+        catch(Newtonsoft.Json.JsonReaderException ex)
+        {
+            System.Diagnostics.Debug.WriteLine(ex.Message);
+            System.Diagnostics.Debug.WriteLine(ex.StackTrace);
+        }
+        catch(Exception ex)
         {
             Console.WriteLine("Mensaje no reconocido");
         }
