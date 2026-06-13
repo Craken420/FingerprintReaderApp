@@ -11,6 +11,7 @@ using Newtonsoft.Json.Linq;
 using SHM.BuroDigital.FolderNewClient;
 using AdaptadorHuella1;
 using Microsoft.Win32;
+using System.Runtime.InteropServices;
 
 var pre_enroll = new PreEnroll();
 
@@ -22,6 +23,7 @@ app.UseWebSockets();
 WebSocket? currentSocket = null;
 WebSocket? wsqSocket = null;
 List<Reader> lectores = new();
+HashSet<string> initializedSerials = new();
 
 dynamic? huellaCliente = null;
 Modo modo = Modo.CAPTURA;
@@ -65,30 +67,56 @@ InitReader();
 
 void InitReader()
 {
+    TryInitReaders();
+    StartReaderPolling();
+}
+
+void StartReaderPolling()
+{
+    _ = Task.Run(async () =>
+    {
+        while (true)
+        {
+            try
+            {
+                await Task.Delay(3000);
+                TryInitReaders();
+            }
+            catch { }
+        }
+    });
+}
+
+void TryInitReaders()
+{
     try
     {
-        ReaderCollection readerCollection = ReaderCollection.GetReaders();
+        bool hadReader = lectores.Count > 0;
+        ReaderCollection readers = ReaderCollection.GetReaders();
+        HashSet<string> currentSerials = new();
 
-        if (readerCollection.Count == 0)
+        foreach (Reader reader in readers)
         {
-            Console.WriteLine("No se encontró lector.");
-            return;
-        }
+            string sn = reader.Description?.SerialNumber ?? "";
+            if (sn.Length > 0)
+                currentSerials.Add(sn);
 
-        foreach (Reader reader in readerCollection)
-        {
+            if (sn.Length > 0 && initializedSerials.Contains(sn))
+                continue;
+
             try
             {
                 lectores.Add(reader);
 
-                reader.Open(Constants.CapturePriority.DP_PRIORITY_EXCLUSIVE);
+                if (sn.Length > 0)
+                    initializedSerials.Add(sn);
 
+                reader.Open(Constants.CapturePriority.DP_PRIORITY_EXCLUSIVE);
                 reader.CaptureAsync(
                     Constants.Formats.Fid.ANSI,
                     Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
                     reader.Capabilities.Resolutions[0]
                 );
-
                 reader.On_Captured += Reader_OnCaptured;
 
                 Console.WriteLine("Lector listo: " + reader.Description.Name);
@@ -98,10 +126,29 @@ void InitReader()
                 Console.WriteLine("Error lector: " + ex.Message);
             }
         }
+
+        for (int i = lectores.Count - 1; i >= 0; i--)
+        {
+            Reader r = lectores[i];
+            string sn = r.Description?.SerialNumber ?? "";
+            if (sn.Length > 0 && !currentSerials.Contains(sn))
+            {
+                try { r.Dispose(); } catch { }
+                lectores.RemoveAt(i);
+                initializedSerials.Remove(sn);
+                Console.WriteLine("Lector desconectado: " + (r.Description?.Name ?? "unknown"));
+            }
+        }
+
+        bool hasReader = lectores.Count > 0;
+        if (hadReader != hasReader)
+        {
+            _ = sendBytesAsync(ActionClient.SYNC_ESTADO, new { haylector = hasReader });
+        }
     }
     catch (Exception ex)
     {
-        Console.WriteLine("Error inicializando lector: " + ex.Message);
+        Console.WriteLine("Error sondeando lectores: " + ex.Message);
     }
 }
 
@@ -436,4 +483,64 @@ app.Map("/wsq", async context =>
     };
     Console.WriteLine("Wsq desconectado");
 });
+AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
+{
+    CleanupResources().GetAwaiter().GetResult();
+};
+
+Console.CancelKeyPress += (sender, e) =>
+{
+    e.Cancel = true;
+    CleanupResources().GetAwaiter().GetResult();
+    Environment.Exit(0);
+};
+
+PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+{
+    CleanupResources().GetAwaiter().GetResult();
+    Environment.Exit(0);
+});
+
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    CleanupResources().GetAwaiter().GetResult();
+});
+
+async Task CleanupResources()
+{
+    Console.WriteLine("Limpiando recursos...");
+
+    if (currentSocket?.State == WebSocketState.Open)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try
+        {
+            await currentSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", cts.Token);
+        }
+        catch { }
+    }
+    currentSocket = null;
+
+    if (wsqSocket?.State == WebSocketState.Open)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try
+        {
+            await wsqSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", cts.Token);
+        }
+        catch { }
+    }
+    wsqSocket = null;
+
+    foreach (var reader in lectores)
+    {
+        try { reader.Dispose(); } catch { }
+    }
+    lectores.Clear();
+
+    pre_enroll.Clear();
+
+    Console.WriteLine("Recursos liberados.");
+}
+
 app.Run("http://localhost:5000");
