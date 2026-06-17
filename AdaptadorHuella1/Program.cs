@@ -144,6 +144,16 @@ void TryInitReaders()
         if (hadReader != hasReader)
         {
             _ = sendBytesAsync(ActionClient.SYNC_ESTADO, new { haylector = hasReader });
+            if (hasReader)
+            {
+                var pingData = new
+                {
+                    type = "pong",
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    haylector = true
+                };
+                _ = sendBytesAsync(ActionClient.PONG, pingData);
+            }
         }
     }
     catch (Exception ex)
@@ -448,6 +458,7 @@ app.Map("/ws", async context =>
         }
     }
 
+    pre_enroll.Clear();
     Console.WriteLine("Frontend desconectado");
 });
 app.Map("/wsq", async context =>
