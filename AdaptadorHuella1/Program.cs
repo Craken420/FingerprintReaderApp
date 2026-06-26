@@ -34,6 +34,7 @@ List<Reader> lectores = new();
 HashSet<string> initializedSerials = new();
 
 dynamic? huellaCliente = null;
+dynamic? currentClient = null;
 
 var handlers = new Dictionary<string, IFingerprintHandler>
 {
@@ -276,6 +277,10 @@ app.Map("/capture", async context =>
                         };
                         await sendCaptureBytesAsync(ActionClient.PONG, data);
                         break;
+                    case "current_client":
+                        currentClient = json["payload"];
+                        Log.Information("Cliente actual establecido en /capture: {BP}", currentClient?.BP);
+                        break;
                 }
             }
         }
@@ -347,6 +352,10 @@ app.Map("/match", async context =>
                     case "huellaCliente":
                         huellaCliente = payload["huella"];
                         Log.Information("Huella de cliente establecida para match");
+                        break;
+                    case "current_client":
+                        currentClient = payload;
+                        Log.Information("Cliente actual establecido en /match: {BP}", currentClient?.BP);
                         break;
                     case "ping":
                         var haylector = Adaptador.HayLector();
