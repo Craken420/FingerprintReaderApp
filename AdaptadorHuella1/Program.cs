@@ -1,4 +1,4 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using AdaptadorHuella;
@@ -10,6 +10,15 @@ using SHM.BuroDigital.FolderNewClient;
 using AdaptadorHuella1;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Debug()
+    .WriteTo.Console(
+        outputTemplate: "{Timestamp:HH:mm:ss} [{Level:u3}] {Message:lj}{NewLine}{Exception}",
+        theme: Serilog.Sinks.SystemConsole.Themes.AnsiConsoleTheme.Code
+    )
+    .CreateLogger();
 
 var pre_enroll = new PreEnroll();
 
@@ -32,11 +41,12 @@ var handlers = new Dictionary<string, IFingerprintHandler>
     ["match"] = new MatchHandler(() => huellaCliente),
 };
 
-Console.WriteLine("=================================");
-Console.WriteLine("Adaptador Huella iniciado");
-Console.WriteLine("WebSocket: ws://localhost:5000/capture");
-Console.WriteLine("WebSocket: ws://localhost:5000/match");
-Console.WriteLine("=================================");
+Log.Information("=================================");
+Log.Information("Adaptador Huella iniciado");
+Log.Information("WebSocket: ws://localhost:5000/capture (conectate aqui para capturar y hacer el eroll)");
+Log.Information("WebSocket: ws://localhost:5000/match (conectate aqui si queres validar un huella)");
+Log.Information("WebSocket: ws://localhost:5000/wsq (conectate aquí para recibir el wsq)");
+Log.Information("=================================");
 
 InitReader();
 
@@ -57,7 +67,10 @@ void StartReaderPolling()
                 await Task.Delay(3000);
                 TryInitReaders();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Error en ciclo de sondeo de lectores");
+            }
         }
     });
 }
@@ -94,11 +107,11 @@ void TryInitReaders()
                 );
                 reader.On_Captured += Reader_OnCaptured;
 
-                Console.WriteLine("Lector listo: " + reader.Description.Name);
+                Log.Information("Lector listo: {ReaderName} (SN: {SerialNumber})", reader.Description.Name, sn);
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Error lector: " + ex.Message);
+                Log.Error(ex, "Error inicializando lector {ReaderName}", reader.Description?.Name ?? "unknown");
             }
         }
 
@@ -111,7 +124,7 @@ void TryInitReaders()
                 try { r.Dispose(); } catch { }
                 lectores.RemoveAt(i);
                 initializedSerials.Remove(sn);
-                Console.WriteLine("Lector desconectado: " + (r.Description?.Name ?? "unknown"));
+                Log.Warning("Lector desconectado: {ReaderName}", r.Description?.Name ?? "unknown");
             }
         }
 
@@ -133,7 +146,7 @@ void TryInitReaders()
     }
     catch (Exception ex)
     {
-        Console.WriteLine("Error sondeando lectores: " + ex.Message);
+        Log.Error(ex, "Error sondeando lectores");
     }
 }
 
@@ -144,7 +157,10 @@ async void Reader_OnCaptured(CaptureResult result)
         if (result.Data == null)
             return;
 
-        Console.WriteLine("Huella capturada");
+        bool hasCapture = captureSocket != null && captureSocket.State == WebSocketState.Open;
+        bool hasMatch = matchSocket != null && matchSocket.State == WebSocketState.Open;
+        if (!hasCapture && !hasMatch)
+            return;
 
         var fid = result.Data;
 
@@ -161,21 +177,23 @@ async void Reader_OnCaptured(CaptureResult result)
             _ => "MALA"
         };
 
+        Log.Debug("Huella capturada (calidad: {Calidad})", calidad);
+
         var raw = fid.Views[0].RawImage;
         var imagen = Adaptador.CreateBitmap(raw, fid.Views[0].Width, fid.Views[0].Height);
 
-        if (captureSocket != null && captureSocket.State == WebSocketState.Open)
+        if (hasCapture)
         {
-            await handlers["capture"].HandleAsync(result, calidad, imagen, captureSocket);
+            await handlers["capture"].HandleAsync(result, calidad, imagen, captureSocket!);
         }
-        else if (matchSocket != null && matchSocket.State == WebSocketState.Open)
+        if (hasMatch)
         {
-            await handlers["match"].HandleAsync(result, calidad, imagen, matchSocket);
+            await handlers["match"].HandleAsync(result, calidad, imagen, matchSocket!);
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine("Error captura: " + ex.Message);
+        Log.Error(ex, "Error procesando captura de huella");
     }
 }
 
@@ -208,7 +226,7 @@ app.Map("/capture", async context =>
     }
 
     captureSocket = await context.WebSockets.AcceptWebSocketAsync();
-    Console.WriteLine("Cliente conectado a /capture");
+    Log.Information("Cliente conectado a /capture");
 
     var buffer = new byte[4096];
 
@@ -224,7 +242,7 @@ app.Map("/capture", async context =>
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 pre_enroll.Clear();
-                Console.WriteLine("Conexi" + '\u00f3' + "n /capture cerrada");
+                Log.Information("Cliente /capture desconectado (cierre limpio)");
                 break;
             }
 
@@ -235,7 +253,7 @@ app.Map("/capture", async context =>
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Console.WriteLine("Mensaje /capture: " + message);
+                    Log.Debug("Mensaje recibido en /capture: {Mensaje}", message);
                     json = JObject.Parse(message);
                 }
                 else
@@ -259,22 +277,21 @@ app.Map("/capture", async context =>
                         await sendCaptureBytesAsync(ActionClient.PONG, data);
                         break;
                 }
-                {
-                    
-                }
             }
         }
         catch (Newtonsoft.Json.JsonReaderException ex)
         {
-            System.Diagnostics.Debug.WriteLine(ex.Message);
-            System.Diagnostics.Debug.WriteLine(ex.StackTrace);
+            Log.Error(ex, "Error de parseo JSON en /capture");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Error en conexi" + '\u00f3' + "n /capture");
+        }
     }
 
     pre_enroll.Clear();
     captureSocket = null;
-    Console.WriteLine("Cliente /capture desconectado");
+    Log.Information("Cliente /capture desconectado");
 });
 
 app.Map("/match", async context =>
@@ -286,7 +303,7 @@ app.Map("/match", async context =>
     }
 
     matchSocket = await context.WebSockets.AcceptWebSocketAsync();
-    Console.WriteLine("Cliente conectado a /match");
+    Log.Information("Cliente conectado a /match");
 
     var buffer = new byte[4096];
 
@@ -301,7 +318,7 @@ app.Map("/match", async context =>
 
             if (result.MessageType == WebSocketMessageType.Close)
             {
-                Console.WriteLine("Conexi" + '\u00f3' + "n /match cerrada");
+                Log.Information("Cliente /match desconectado (cierre limpio)");
                 break;
             }
 
@@ -312,7 +329,7 @@ app.Map("/match", async context =>
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Console.WriteLine("Mensaje /match: " + message);
+                    Log.Debug("Mensaje recibido en /match: {Mensaje}", message);
                     json = JObject.Parse(message);
                 }
                 else
@@ -329,7 +346,7 @@ app.Map("/match", async context =>
                 {
                     case "huellaCliente":
                         huellaCliente = payload["huella"];
-                        System.Diagnostics.Debug.WriteLine("Huella cliente establecida");
+                        Log.Information("Huella de cliente establecida para match");
                         break;
                     case "ping":
                         var haylector = Adaptador.HayLector();
@@ -346,15 +363,17 @@ app.Map("/match", async context =>
         }
         catch (Newtonsoft.Json.JsonReaderException ex)
         {
-            System.Diagnostics.Debug.WriteLine(ex.Message);
-            System.Diagnostics.Debug.WriteLine(ex.StackTrace);
+            Log.Error(ex, "Error de parseo JSON en /match");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Error en conexi" + '\u00f3' + "n /match");
+        }
     }
 
     huellaCliente = null;
     matchSocket = null;
-    Console.WriteLine("Cliente /match desconectado");
+    Log.Information("Cliente /match desconectado");
 });
 
 app.Map("/wsq", async context =>
@@ -367,7 +386,7 @@ app.Map("/wsq", async context =>
 
     wsqSocket = await context.WebSockets.AcceptWebSocketAsync();
 
-    Console.WriteLine("Frontend conectado");
+    Log.Information("Cliente conectado a /wsq");
     var buffer = new byte[4096];
     while (wsqSocket.State == WebSocketState.Open)
     {
@@ -384,11 +403,10 @@ app.Map("/wsq", async context =>
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex.StackTrace);
+            Log.Error(ex, "Error en conexi" + '\u00f3' + "n /wsq");
         }
     };
-    Console.WriteLine("Wsq desconectado");
+    Log.Information("Cliente /wsq desconectado");
 });
 
 AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
@@ -416,7 +434,7 @@ app.Lifetime.ApplicationStopping.Register(() =>
 
 async Task CleanupResources()
 {
-    Console.WriteLine("Limpiando recursos...");
+    Log.Information("Limpiando recursos...");
 
     if (captureSocket?.State == WebSocketState.Open)
     {
@@ -459,7 +477,15 @@ async Task CleanupResources()
 
     pre_enroll.Clear();
 
-    Console.WriteLine("Recursos liberados.");
+    Log.Information("Recursos liberados.");
+    Log.CloseAndFlush();
 }
 
-app.Run("http://localhost:5000");
+try
+{
+    app.Run("http://localhost:5000");
+}
+finally
+{
+    Log.CloseAndFlush();
+}

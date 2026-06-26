@@ -1,5 +1,6 @@
 using AdaptadorHuella;
 using DPUruNet;
+using Serilog;
 using System.Net.WebSockets;
 
 namespace AdaptadorHuella1;
@@ -62,7 +63,7 @@ internal class MatchHandler : IFingerprintHandler
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("Error comparacion: " + ex.Message);
+                    Log.Error(ex, "Error comparando huellas en match");
                 }
             }
             else
@@ -73,7 +74,7 @@ internal class MatchHandler : IFingerprintHandler
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Error captura: " + ex.Message);
+            Log.Error(ex, "Error en MatchHandler.HandleAsync");
         }
     }
 }

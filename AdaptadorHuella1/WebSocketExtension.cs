@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json.Bson;
+using Serilog;
 using System;
 using System.Net.WebSockets;
 using AdaptadorHuella;
@@ -34,7 +35,7 @@ namespace AdaptadorHuella1
                     CancellationToken.None
                 );
 
-                Console.WriteLine("Datos wsq enviados al frontend");
+                Log.Debug("Datos BSON enviados al frontend (action: {Action})", action);
             }
         }
     }

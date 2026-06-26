@@ -2,6 +2,7 @@ using AdaptadorHuella;
 using DPUruNet;
 using Newtonsoft.Json.Bson;
 using SHM.BuroDigital.FolderNewClient;
+using Serilog;
 using System.Net.WebSockets;
 
 namespace AdaptadorHuella1;
@@ -50,7 +51,7 @@ internal class CaptureHandler : IFingerprintHandler
                 );
                 _preEnroll.Add(resultconvert.Data);
                 response.numero = _preEnroll.Count;
-                Console.WriteLine("Es " + _preEnroll.Count);
+                Log.Debug("Huella capturada #{Count}/4 en captura", _preEnroll.Count);
 
                 bool encontrado = false;
                 var huellaCliente = _getHuellaCliente();
@@ -75,9 +76,7 @@ internal class CaptureHandler : IFingerprintHandler
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex.Message);
-            System.Diagnostics.Debug.WriteLine(ex.Message);
-            System.Diagnostics.Debug.WriteLine(ex.StackTrace);
+            Log.Error(ex, "Error en CaptureHandler.HandleAsync");
         }
     }
 
@@ -130,7 +129,7 @@ internal class CaptureHandler : IFingerprintHandler
                 true,
                 CancellationToken.None
             );
-            Console.WriteLine("Datos wsq enviados al frontend");
+            Log.Debug("Datos WSQ enviados al frontend");
         }
     }
 }
