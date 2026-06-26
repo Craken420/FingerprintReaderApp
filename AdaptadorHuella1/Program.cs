@@ -1,6 +1,4 @@
-﻿using System;
 using System.Net.WebSockets;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using AdaptadorHuella;
@@ -20,48 +18,25 @@ var app = builder.Build();
 
 app.UseWebSockets();
 
-WebSocket? currentSocket = null;
+WebSocket? captureSocket = null;
+WebSocket? matchSocket = null;
 WebSocket? wsqSocket = null;
 List<Reader> lectores = new();
 HashSet<string> initializedSerials = new();
 
 dynamic? huellaCliente = null;
-Modo modo = Modo.CAPTURA;
 
-var messageHandlers = new Dictionary<string, Action<WebSocket, JObject>>
+var handlers = new Dictionary<string, IFingerprintHandler>
 {
-    ["huellaCliente"] = (ws, payload) => {
-        huellaCliente = payload["huella"];
-        System.Diagnostics.Debug.WriteLine("Huella clliente esptablecida");
-    },
-    
-    ["ping"] = async (ws, payload) => {
-        var haylector = Adaptador.HayLector();
-        var data = new
-        {
-            type = "pong",
-            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            haylector = haylector
-        };
-        await sendBytesAsync(ActionClient.PONG, data);
-    },
-    ["capture"] = (ws, payload) => {
-        modo = Modo.CAPTURA;
-        Console.WriteLine("Modo CAPTURA activado");
-        System.Diagnostics.Debug.WriteLine("Modo CAPTURA activado");
-    },
-    ["match"] = (ws, payload) => {
-        modo = Modo.MATCH;
-        huellaCliente = payload["huella"]?.ToString() ?? "";
-        Console.WriteLine("Modo MATCH activado");
-    }
+    ["capture"] = new CaptureHandler(pre_enroll, () => wsqSocket, () => huellaCliente),
+    ["match"] = new MatchHandler(() => huellaCliente),
 };
 
 Console.WriteLine("=================================");
 Console.WriteLine("Adaptador Huella iniciado");
-Console.WriteLine("WebSocket: ws://localhost:5000/ws");
+Console.WriteLine("WebSocket: ws://localhost:5000/capture");
+Console.WriteLine("WebSocket: ws://localhost:5000/match");
 Console.WriteLine("=================================");
-
 
 InitReader();
 
@@ -143,7 +118,7 @@ void TryInitReaders()
         bool hasReader = lectores.Count > 0;
         if (hadReader != hasReader)
         {
-            _ = sendBytesAsync(ActionClient.SYNC_ESTADO, new { haylector = hasReader });
+            _ = BroadcastEstadoAsync(new { haylector = hasReader });
             if (hasReader)
             {
                 var pingData = new
@@ -152,7 +127,7 @@ void TryInitReaders()
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     haylector = true
                 };
-                _ = sendBytesAsync(ActionClient.PONG, pingData);
+                _ = BroadcastEstadoAsync(pingData);
             }
         }
     }
@@ -172,7 +147,7 @@ async void Reader_OnCaptured(CaptureResult result)
         Console.WriteLine("Huella capturada");
 
         var fid = result.Data;
-        
+
         int score = Quality.NfiqFid(
             fid,
             0,
@@ -187,143 +162,16 @@ async void Reader_OnCaptured(CaptureResult result)
         };
 
         var raw = fid.Views[0].RawImage;
-
-        //await sendBytesAsync(raw);
-        //return;
-
         var imagen = Adaptador.CreateBitmap(raw, fid.Views[0].Width, fid.Views[0].Height);
 
-        //System.IO.File.WriteAllText("File.txt", lectura);
-        bool match = false;
-
-        var response = new ResponseBody()
+        if (captureSocket != null && captureSocket.State == WebSocketState.Open)
         {
-
-            modo = modo.ToString(),
-            match = match,
-            Calidad = calidad,
-            Lectura = fid.Bytes,
-            Imagen = imagen,
-            numero = 0
-        };
-
-        if (modo == Modo.MATCH)
-        {
-            if(huellaCliente != null)
-            {
-                try
-                {
-                    byte[] baHuella = huellaCliente;
-
-                    DataResult<Fmd> HuellaBD =
-                        Importer.ImportFmd(
-                            baHuella,
-                            Constants.Formats.Fmd.DP_REGISTRATION,
-                            Constants.Formats.Fmd.DP_REGISTRATION
-                        );
-
-                    DataResult<Fmd> Actual =
-                        FeatureExtraction.CreateFmdFromFid(
-                            fid,
-                            Constants.Formats.Fmd.ISO
-                        );
-
-                    CompareResult resultado =
-                        Comparison.Compare(
-                            Actual.Data,
-                            0,
-                            HuellaBD.Data,
-                            0
-                        );
-
-                    match = resultado.Score < 500;
-                    await sendBytesAsync( ActionClient.ON_CAPTURED_MATCH, response);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("Error comparación: " + ex.Message);
-                }
-            } else
-            {
-                response.mensaje = "El cliente no tiene huela para maatch";
-
-            }
+            await handlers["capture"].HandleAsync(result, calidad, imagen, captureSocket);
         }
-        else if (modo == Modo.CAPTURA)
+        else if (matchSocket != null && matchSocket.State == WebSocketState.Open)
         {
-            try
-            {
-                //dynamic otro = Adaptador.ToDB(result);
-                var otro = new ToDb()
-                {
-                    lol = true,
-                    correcto = true,
-                    mensaje = "Huella excelente"
-                };
-                response.mensaje = otro.mensaje;
-                if (otro.correcto && otro.lol)
-                {
-
-                    //VerificarHuellListNegr(result);
-                    DataResult<Fmd> resultconvert = FeatureExtraction.CreateFmdFromFid(result.Data, Constants.Formats.Fmd.DP_PRE_REGISTRATION);
-                    pre_enroll.Add(resultconvert.Data);
-                    response.numero = pre_enroll.Count;
-                    Console.WriteLine(" Es " + pre_enroll.Count);
-                    bool encontrado = false;
-                    if (huellaCliente != null)
-                    {
-                        encontrado = Adaptador.ExisteHuellaSimilar(result, (byte[])huellaCliente);
-                        if (encontrado)
-                            response.mensaje = "La huella coincide con la que se registro anteriormente";
-                    }
-                    response.match = encontrado;
-                    await sendBytesAsync(ActionClient.ON_CAPTURED_CAPTURA, response);
-                    if (encontrado == false && pre_enroll.Count == 4)
-                    {
-                        DataResult<Fmd> result_enroll = Enrollment.CreateEnrollmentFmd(Constants.Formats.Fmd.DP_REGISTRATION, pre_enroll);
-
-
-                        if (result_enroll.ResultCode == Constants.ResultCode.DP_SUCCESS)
-                        {
-                            byte[] x = result_enroll.Data.Bytes;
-                            var CrearWsq = WSQ.CompressNIST(result.Data, 94, 24000);
-                            var q = new
-                            {
-                                wsq = CrearWsq,
-                                huella = x,
-                                status = result_enroll.ResultCode.ToString()
-                            };
-
-                            await setBytesWsqAsync(q);
-                            pre_enroll.Clear();
-                        } else
-                        {
-                            var q = new
-                            {
-                                status = result_enroll.ResultCode.ToString()
-                            };
-                            await setBytesWsqAsync(q);
-                            pre_enroll.Clear();
-                        }
-                    }
-                }
-                else
-                {
-                    await sendBytesAsync(ActionClient.ON_CAPTURED_CAPTURA, response);
-                }
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
-                System.Diagnostics.Debug.WriteLine(ex.Message);
-                System.Diagnostics.Debug.WriteLine(ex.StackTrace);
-            }
+            await handlers["match"].HandleAsync(result, calidad, imagen, matchSocket);
         }
-
-        
-
-        
     }
     catch (Exception ex)
     {
@@ -331,58 +179,27 @@ async void Reader_OnCaptured(CaptureResult result)
     }
 }
 
-async Task setBytesWsqAsync(dynamic data)
+async Task sendCaptureBytesAsync(ActionClient action, object data)
 {
-    if (wsqSocket != null && wsqSocket.State == WebSocketState.Open)
-    {
-        MemoryStream ms = new MemoryStream();
-        using (BsonDataWriter writer = new BsonDataWriter(ms))
-        {
-            var serializer = new Newtonsoft.Json.JsonSerializer();
-            
-            serializer.Serialize(writer, data);
-        }
-        byte[] bsonBytes = ms.ToArray();
-        await wsqSocket.SendAsync(
-            new ArraySegment<byte>(bsonBytes),
-            WebSocketMessageType.Binary,
-            true,
-            CancellationToken.None
-        );
-
-        Console.WriteLine("Datos wsq enviados al frontend");
-    }
+    if (captureSocket != null && captureSocket.State == WebSocketState.Open)
+        await captureSocket.sendBytesAsync(action, data);
 }
 
-async Task sendBytesAsync(ActionClient action, dynamic data )
+async Task sendMatchBytesAsync(ActionClient action, object data)
 {
-    if (currentSocket != null && currentSocket.State == WebSocketState.Open)
-    {
-        Console.WriteLine("SendByteAsync: ", action);
-        MemoryStream ms = new MemoryStream();
-        var p = new
-        {
-            type = action.ToString(),
-            payload = data
-        };
-        using (BsonDataWriter writer = new BsonDataWriter(ms))
-        {
-            var serializer = new Newtonsoft.Json.JsonSerializer();
-            serializer.Serialize(writer, p);
-        }
-        byte[] bsonBytes = ms.ToArray();
-        await currentSocket.SendAsync(
-            new ArraySegment<byte>(bsonBytes),
-            WebSocketMessageType.Binary,
-            true,
-            CancellationToken.None
-        );
-
-        Console.WriteLine("Datos enviados al frontend");
-    }
+    if (matchSocket != null && matchSocket.State == WebSocketState.Open)
+        await matchSocket.sendBytesAsync(action, data);
 }
 
-app.Map("/ws", async context =>
+async Task BroadcastEstadoAsync(object data)
+{
+    if (captureSocket != null && captureSocket.State == WebSocketState.Open)
+        await captureSocket.sendBytesAsync(ActionClient.SYNC_ESTADO, data);
+    if (matchSocket != null && matchSocket.State == WebSocketState.Open)
+        await matchSocket.sendBytesAsync(ActionClient.SYNC_ESTADO, data);
+}
+
+app.Map("/capture", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
     {
@@ -390,18 +207,16 @@ app.Map("/ws", async context =>
         return;
     }
 
-    currentSocket = await context.WebSockets.AcceptWebSocketAsync();
+    captureSocket = await context.WebSockets.AcceptWebSocketAsync();
+    Console.WriteLine("Cliente conectado a /capture");
 
-    Console.WriteLine("Frontend conectado");
-    
     var buffer = new byte[4096];
 
-    while (currentSocket.State == WebSocketState.Open)
+    while (captureSocket.State == WebSocketState.Open)
     {
-
         try
         {
-            var result = await currentSocket.ReceiveAsync(
+            var result = await captureSocket.ReceiveAsync(
                 new ArraySegment<byte>(buffer),
                 CancellationToken.None
             );
@@ -409,20 +224,95 @@ app.Map("/ws", async context =>
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 pre_enroll.Clear();
-                Console.WriteLine("👉👉Conexión cerrada");
+                Console.WriteLine("Conexi" + '\u00f3' + "n /capture cerrada");
                 break;
             }
 
             if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary)
             {
-                System.Diagnostics.Debug.WriteLine("👉MessageType:" + result.MessageType);
-
                 JObject json;
 
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Console.WriteLine("Mensaje frontend: " + message);
+                    Console.WriteLine("Mensaje /capture: " + message);
+                    json = JObject.Parse(message);
+                }
+                else
+                {
+                    using var stream = new MemoryStream(buffer, 0, result.Count);
+                    using var bsonReader = new BsonDataReader(stream);
+                    json = JObject.Load(bsonReader);
+                }
+
+                var type = json["type"]?.ToString();
+                switch (type)
+                {
+                    case "ping":
+                        var haylector = Adaptador.HayLector();
+                        var data = new
+                        {
+                            type = "pong",
+                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            haylector = haylector
+                        };
+                        await sendCaptureBytesAsync(ActionClient.PONG, data);
+                        break;
+                }
+                {
+                    
+                }
+            }
+        }
+        catch (Newtonsoft.Json.JsonReaderException ex)
+        {
+            System.Diagnostics.Debug.WriteLine(ex.Message);
+            System.Diagnostics.Debug.WriteLine(ex.StackTrace);
+        }
+        catch { }
+    }
+
+    pre_enroll.Clear();
+    captureSocket = null;
+    Console.WriteLine("Cliente /capture desconectado");
+});
+
+app.Map("/match", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = 400;
+        return;
+    }
+
+    matchSocket = await context.WebSockets.AcceptWebSocketAsync();
+    Console.WriteLine("Cliente conectado a /match");
+
+    var buffer = new byte[4096];
+
+    while (matchSocket.State == WebSocketState.Open)
+    {
+        try
+        {
+            var result = await matchSocket.ReceiveAsync(
+                new ArraySegment<byte>(buffer),
+                CancellationToken.None
+            );
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                Console.WriteLine("Conexi" + '\u00f3' + "n /match cerrada");
+                break;
+            }
+
+            if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary)
+            {
+                JObject json;
+
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    Console.WriteLine("Mensaje /match: " + message);
                     json = JObject.Parse(message);
                 }
                 else
@@ -434,33 +324,39 @@ app.Map("/ws", async context =>
 
                 var type = json["type"]?.ToString();
                 var payload = (JObject)json["payload"]!;
-                System.Diagnostics.Debug.WriteLine("🎁🎁TYPE:" + type);
-                if (messageHandlers.TryGetValue(type!, out var handler))
+
+                switch (type)
                 {
-                    //manejar el mensaje solicituado
-                    handler(currentSocket, payload);
-                    
-                }
-                else
-                {
-                    Console.WriteLine($"Tipo de mensaje no reconocido: {type}");
+                    case "huellaCliente":
+                        huellaCliente = payload["huella"];
+                        System.Diagnostics.Debug.WriteLine("Huella cliente establecida");
+                        break;
+                    case "ping":
+                        var haylector = Adaptador.HayLector();
+                        var data = new
+                        {
+                            type = "pong",
+                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            haylector = haylector
+                        };
+                        await sendMatchBytesAsync(ActionClient.PONG, data);
+                        break;
                 }
             }
         }
-        catch(Newtonsoft.Json.JsonReaderException ex)
+        catch (Newtonsoft.Json.JsonReaderException ex)
         {
             System.Diagnostics.Debug.WriteLine(ex.Message);
             System.Diagnostics.Debug.WriteLine(ex.StackTrace);
         }
-        catch(Exception ex)
-        {
-            Console.WriteLine("Mensaje no reconocido");
-        }
+        catch { }
     }
 
-    pre_enroll.Clear();
-    Console.WriteLine("Frontend desconectado");
+    huellaCliente = null;
+    matchSocket = null;
+    Console.WriteLine("Cliente /match desconectado");
 });
+
 app.Map("/wsq", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
@@ -494,6 +390,7 @@ app.Map("/wsq", async context =>
     };
     Console.WriteLine("Wsq desconectado");
 });
+
 AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
 {
     CleanupResources().GetAwaiter().GetResult();
@@ -521,16 +418,27 @@ async Task CleanupResources()
 {
     Console.WriteLine("Limpiando recursos...");
 
-    if (currentSocket?.State == WebSocketState.Open)
+    if (captureSocket?.State == WebSocketState.Open)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         try
         {
-            await currentSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", cts.Token);
+            await captureSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", cts.Token);
         }
         catch { }
     }
-    currentSocket = null;
+    captureSocket = null;
+
+    if (matchSocket?.State == WebSocketState.Open)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try
+        {
+            await matchSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", cts.Token);
+        }
+        catch { }
+    }
+    matchSocket = null;
 
     if (wsqSocket?.State == WebSocketState.Open)
     {
