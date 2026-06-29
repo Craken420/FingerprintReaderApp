@@ -58,6 +58,7 @@ internal class MatchHandler : IFingerprintHandler
                             0
                         );
 
+                    response.Score = resultado.Score;
                     response.match = resultado.Score < 500;
                     await socket.sendBytesAsync(ActionClient.ON_CAPTURED_MATCH, response);
                 }

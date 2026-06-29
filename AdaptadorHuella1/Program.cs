@@ -227,6 +227,7 @@ app.Map("/capture", async context =>
     }
 
     captureSocket = await context.WebSockets.AcceptWebSocketAsync();
+    pre_enroll.Clear();
     Log.Information("Cliente conectado a /capture");
 
     var buffer = new byte[4096];
@@ -307,7 +308,11 @@ app.Map("/match", async context =>
         return;
     }
 
+    var apiClient = new ApiClient();
+
     matchSocket = await context.WebSockets.AcceptWebSocketAsync();
+    huellaCliente = null;
+    currentClient = null;
     Log.Information("Cliente conectado a /match");
 
     var buffer = new byte[4096];
@@ -349,13 +354,27 @@ app.Map("/match", async context =>
 
                 switch (type)
                 {
-                    case "huellaCliente":
-                        huellaCliente = payload["huella"];
-                        Log.Information("Huella de cliente establecida para match");
-                        break;
                     case "current_client":
                         currentClient = payload;
-                        Log.Information("Cliente actual establecido en /match: {BP}", currentClient?.BP);
+                        var bp = currentClient?.BP?.ToString();
+                        Log.Information("Cliente actual establecido en /match: {BP}", bp);
+                        if (!string.IsNullOrEmpty(bp))
+                        {
+                            Log.Debug("Obteniendo huella del cliente {BP} desde API...", bp);
+                            
+                            huellaCliente = await apiClient.GetHuellaBytesAsync(bp);
+                            var d = new
+                            {
+                                type = "huella_cliente",
+                                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                existenciaHuellas = huellaCliente != null
+                            };
+                            if (huellaCliente != null)
+                                Log.Information("Huella obtenida correctamente para cliente {BP}", bp);
+                            else
+                                Log.Warning("No se pudo obtener huella para cliente {BP}", bp);
+                            await sendMatchBytesAsync(ActionClient.SYNC_ESTADO, d);
+                        }
                         break;
                     case "ping":
                         var haylector = Adaptador.HayLector();
@@ -367,6 +386,8 @@ app.Map("/match", async context =>
                         };
                         await sendMatchBytesAsync(ActionClient.PONG, data);
                         break;
+                    default:
+                        throw new ApplicationException("Type de mensaje no se entiende");
                 }
             }
         }

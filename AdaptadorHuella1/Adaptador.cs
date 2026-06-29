@@ -149,6 +149,7 @@ namespace AdaptadorHuella
          * enviar mensaje al cliente
          */
         public string mensaje { get; set; }
+        public int Score { get; set; }
     }
 
     internal class PreEnroll : System.Collections.Generic.IList<Fmd>

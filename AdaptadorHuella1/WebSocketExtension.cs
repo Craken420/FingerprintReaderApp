@@ -17,7 +17,7 @@ namespace AdaptadorHuella1
             {
                 var p = new
                 {
-                    type = action,
+                    type = action.ToString(),
                     payload = payload
                 };
                 MemoryStream ms = new MemoryStream();
