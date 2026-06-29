@@ -1,6 +1,7 @@
 using AdaptadorHuella;
 using DPUruNet;
 using Newtonsoft.Json.Bson;
+using Newtonsoft.Json.Linq;
 using SHM.BuroDigital.FolderNewClient;
 using Serilog;
 using System.Net.WebSockets;
@@ -12,12 +13,14 @@ internal class CaptureHandler : IFingerprintHandler
     private readonly PreEnroll _preEnroll;
     private readonly Func<WebSocket?> _getWsqSocket;
     private readonly Func<dynamic?> _getHuellaCliente;
+    private readonly Action<dynamic?> _setCurrentClient;
 
-    public CaptureHandler(PreEnroll preEnroll, Func<WebSocket?> getWsqSocket, Func<dynamic?> getHuellaCliente)
+    public CaptureHandler(PreEnroll preEnroll, Func<WebSocket?> getWsqSocket, Func<dynamic?> getHuellaCliente, Action<dynamic?> setCurrentClient)
     {
         _preEnroll = preEnroll;
         _getWsqSocket = getWsqSocket;
         _getHuellaCliente = getHuellaCliente;
+        _setCurrentClient = setCurrentClient;
     }
 
     public async Task HandleAsync(CaptureResult result, string calidad, byte[] imagen, WebSocket socket)
@@ -109,6 +112,27 @@ internal class CaptureHandler : IFingerprintHandler
             };
             await SendWsqBytesAsync(q, wsqSocket);
             _preEnroll.Clear();
+        }
+    }
+
+    public async Task HandleMessageAsync(string type, JObject payload, WebSocket socket)
+    {
+        switch (type)
+        {
+            case "ping":
+                var haylector = Adaptador.HayLector();
+                var data = new
+                {
+                    type = "pong",
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    haylector
+                };
+                await socket.sendBytesAsync(ActionClient.PONG, data);
+                break;
+            case "current_client":
+                _setCurrentClient(payload);
+                Log.Information("Cliente actual establecido en /capture: {BP}", payload["BP"]);
+                break;
         }
     }
 

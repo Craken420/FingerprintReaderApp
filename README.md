@@ -16,9 +16,9 @@ FingerprintReaderApp/
 │   ├── appsettings.json                 # Configuración ASP.NET
 │   ├── lib/DPUruNet.dll                 # SDK de DigitalPersona
 │   └── Handlers/
-│       ├── IFingerprintHandler.cs       # Interfaz de handler
-│       ├── CaptureHandler.cs            # Captura para enrolamiento (4 muestras)
-│       └── MatchHandler.cs              # Verificación contra huella almacenada
+│       ├── IFingerprintHandler.cs       # Interfaz: HandleAsync + HandleMessageAsync
+│       ├── CaptureHandler.cs            # Captura (enrolamiento + manejo de mensajes)
+│       └── MatchHandler.cs              # Verificación (match + manejo de mensajes)
 ├── AdaptadorHuella2/                    # Cliente WinForms legacy (.NET 4.7.2)
 │   ├── Program.cs
 │   ├── Form1.cs                         # UI que muestra imagen de huella vía WebSocket
@@ -44,9 +44,8 @@ Punto de entrada del servidor. Crea una aplicación ASP.NET Core que:
   - `/capture` — captura para enrolamiento (acumula hasta 4 muestras y genera FMD + WSQ).
   - `/match` — verificación: compara huella capturada contra una referencia.
   - `/wsq` — recibe los datos WSQ comprimidos al finalizar enrolamiento.
-- Maneja mensajes `ping` → responde `pong` con timestamp y estado del lector.
-- Gestiona `current_client` para asociar la captura a un cliente.
-- Al capturar, evalúa calidad NFIQ (1=EXCELENTE, 2=BUENA, otro=MALA) y rutea a `CaptureHandler` o `MatchHandler`.
+- Los mensajes entrantes se parsean (JSON/BSON) y se delegan al `HandleMessageAsync` del handler correspondiente mediante el helper `ParseMessage`.
+- Al capturar, evalúa calidad NFIQ (1=EXCELENTE, 2=BUENA, otro=MALA) y rutea a `HandleAsync` de `CaptureHandler` o `MatchHandler`.
 - Limpieza graceful en shutdown (SIGTERM, Ctrl+C, ProcessExit).
 
 ### `AdaptadorHuella1/Adaptador.cs`
@@ -71,17 +70,20 @@ Wrapper P/Invoke para obtener puntaje NFIQ (NIST Fingerprint Image Quality) desd
 ### `AdaptadorHuella1/ApiClient.cs`
 Cliente REST que obtiene la huella almacenada de un cliente desde `https://biometrico-api.mavi.fun/A_GET_HuellaCliente?cliente={BP}`.
 
+### `AdaptadorHuella1/Handlers/IFingerprintHandler.cs`
+Interfaz que define dos métodos:
+- `HandleAsync` — procesa el resultado de una captura de huella digital (calidad, imagen, socket).
+- `HandleMessageAsync` — procesa mensajes entrantes del cliente WebSocket (`ping`, `current_client`, etc.).
+
 ### `AdaptadorHuella1/Handlers/CaptureHandler.cs`
 Maneja la captura para enrolamiento:
-- Extrae FMD en formato `DP_PRE_REGISTRATION` y lo agrega al buffer `PreEnroll`.
-- Después de 4 capturas exitosas, genera el FMD de enrolamiento (`Enrollment.CreateEnrollmentFmd`) y comprime la imagen a WSQ.
-- Envía los datos WSQ al cliente conectado en `/wsq`.
+- **`HandleAsync`**: extrae FMD en formato `DP_PRE_REGISTRATION` y lo agrega al buffer `PreEnroll`. Después de 4 capturas exitosas, genera el FMD de enrolamiento y comprime la imagen a WSQ.
+- **`HandleMessageAsync`**: atiende mensajes `"ping"` (responde PONG con timestamp y estado del lector) y `"current_client"` (almacena la referencia del cliente actual vía callback).
 
 ### `AdaptadorHuella1/Handlers/MatchHandler.cs`
 Maneja la verificación:
-- Importa el FMD almacenado del cliente (`Importer.ImportFmd`).
-- Extrae FMD de la captura actual (`FeatureExtraction.CreateFmdFromFid`).
-- Compara con `Comparison.Compare` — si `Score < 500` se considera match exitoso.
+- **`HandleAsync`**: importa el FMD almacenado del cliente (`Importer.ImportFmd`), extrae FMD de la captura actual (`FeatureExtraction.CreateFmdFromFid`) y compara con `Comparison.Compare` — si `Score < 500` se considera match exitoso.
+- **`HandleMessageAsync`**: atiende `"current_client"` (consume `ApiClient` para obtener la huella del cliente desde la API externa, almacena el resultado y envía `SYNC_ESTADO` con `existenciaHuellas`) y `"ping"` (responde PONG).
 
 ## Diagramas de secuencia
 

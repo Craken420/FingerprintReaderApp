@@ -38,8 +38,10 @@ dynamic? currentClient = null;
 
 var handlers = new Dictionary<string, IFingerprintHandler>
 {
-    ["capture"] = new CaptureHandler(pre_enroll, () => wsqSocket, () => huellaCliente),
-    ["match"] = new MatchHandler(() => huellaCliente),
+    ["capture"] = new CaptureHandler(pre_enroll, () => wsqSocket, () => huellaCliente,
+        v => { currentClient = v; }),
+    ["match"] = new MatchHandler(() => huellaCliente,
+        new ApiClient(), v => { huellaCliente = v; }, v => { currentClient = v; }),
 };
 
 Log.Information("=================================");
@@ -198,24 +200,32 @@ async void Reader_OnCaptured(CaptureResult result)
     }
 }
 
-async Task sendCaptureBytesAsync(ActionClient action, object data)
-{
-    if (captureSocket != null && captureSocket.State == WebSocketState.Open)
-        await captureSocket.sendBytesAsync(action, data);
-}
-
-async Task sendMatchBytesAsync(ActionClient action, object data)
-{
-    if (matchSocket != null && matchSocket.State == WebSocketState.Open)
-        await matchSocket.sendBytesAsync(action, data);
-}
-
 async Task BroadcastEstadoAsync(object data)
 {
     if (captureSocket != null && captureSocket.State == WebSocketState.Open)
         await captureSocket.sendBytesAsync(ActionClient.SYNC_ESTADO, data);
     if (matchSocket != null && matchSocket.State == WebSocketState.Open)
         await matchSocket.sendBytesAsync(ActionClient.SYNC_ESTADO, data);
+}
+
+static (string? type, JObject? payload) ParseMessage(WebSocketReceiveResult result, byte[] buffer)
+{
+    JObject json;
+
+    if (result.MessageType == WebSocketMessageType.Text)
+    {
+        var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+        Log.Debug("Mensaje recibido: {Mensaje}", message);
+        json = JObject.Parse(message);
+    }
+    else
+    {
+        using var stream = new MemoryStream(buffer, 0, result.Count);
+        using var bsonReader = new BsonDataReader(stream);
+        json = JObject.Load(bsonReader);
+    }
+
+    return (json["type"]?.ToString(), (JObject?)json["payload"]);
 }
 
 app.Map("/capture", async context =>
@@ -250,39 +260,9 @@ app.Map("/capture", async context =>
 
             if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary)
             {
-                JObject json;
-
-                if (result.MessageType == WebSocketMessageType.Text)
-                {
-                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Log.Debug("Mensaje recibido en /capture: {Mensaje}", message);
-                    json = JObject.Parse(message);
-                }
-                else
-                {
-                    using var stream = new MemoryStream(buffer, 0, result.Count);
-                    using var bsonReader = new BsonDataReader(stream);
-                    json = JObject.Load(bsonReader);
-                }
-
-                var type = json["type"]?.ToString();
-                switch (type)
-                {
-                    case "ping":
-                        var haylector = Adaptador.HayLector();
-                        var data = new
-                        {
-                            type = "pong",
-                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                            haylector = haylector
-                        };
-                        await sendCaptureBytesAsync(ActionClient.PONG, data);
-                        break;
-                    case "current_client":
-                        currentClient = json["payload"];
-                        Log.Information("Cliente actual establecido en /capture: {BP}", currentClient?.BP);
-                        break;
-                }
+                var (type, payload) = ParseMessage(result, buffer);
+                if (type != null)
+                    await handlers["capture"].HandleMessageAsync(type, payload!, captureSocket);
             }
         }
         catch (Newtonsoft.Json.JsonReaderException ex)
@@ -308,8 +288,6 @@ app.Map("/match", async context =>
         return;
     }
 
-    var apiClient = new ApiClient();
-
     matchSocket = await context.WebSockets.AcceptWebSocketAsync();
     huellaCliente = null;
     currentClient = null;
@@ -334,61 +312,9 @@ app.Map("/match", async context =>
 
             if (result.MessageType == WebSocketMessageType.Text || result.MessageType == WebSocketMessageType.Binary)
             {
-                JObject json;
-
-                if (result.MessageType == WebSocketMessageType.Text)
-                {
-                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Log.Debug("Mensaje recibido en /match: {Mensaje}", message);
-                    json = JObject.Parse(message);
-                }
-                else
-                {
-                    using var stream = new MemoryStream(buffer, 0, result.Count);
-                    using var bsonReader = new BsonDataReader(stream);
-                    json = JObject.Load(bsonReader);
-                }
-
-                var type = json["type"]?.ToString();
-                var payload = (JObject)json["payload"]!;
-
-                switch (type)
-                {
-                    case "current_client":
-                        currentClient = payload;
-                        var bp = currentClient?.BP?.ToString();
-                        Log.Information("Cliente actual establecido en /match: {BP}", bp);
-                        if (!string.IsNullOrEmpty(bp))
-                        {
-                            Log.Debug("Obteniendo huella del cliente {BP} desde API...", bp);
-                            
-                            huellaCliente = await apiClient.GetHuellaBytesAsync(bp);
-                            var d = new
-                            {
-                                type = "huella_cliente",
-                                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                                existenciaHuellas = huellaCliente != null
-                            };
-                            if (huellaCliente != null)
-                                Log.Information("Huella obtenida correctamente para cliente {BP}", bp);
-                            else
-                                Log.Warning("No se pudo obtener huella para cliente {BP}", bp);
-                            await sendMatchBytesAsync(ActionClient.SYNC_ESTADO, d);
-                        }
-                        break;
-                    case "ping":
-                        var haylector = Adaptador.HayLector();
-                        var data = new
-                        {
-                            type = "pong",
-                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                            haylector = haylector
-                        };
-                        await sendMatchBytesAsync(ActionClient.PONG, data);
-                        break;
-                    default:
-                        throw new ApplicationException("Type de mensaje no se entiende");
-                }
+                var (type, payload) = ParseMessage(result, buffer);
+                if (type != null)
+                    await handlers["match"].HandleMessageAsync(type, payload!, matchSocket);
             }
         }
         catch (Newtonsoft.Json.JsonReaderException ex)
