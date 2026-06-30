@@ -8,17 +8,19 @@ namespace AdaptadorHuella1;
 
 internal class MatchHandler : IFingerprintHandler
 {
-    private readonly Func<dynamic?> _getHuellaCliente;
     private readonly ApiClient _apiClient;
-    private readonly Action<dynamic?> _setHuellaCliente;
-    private readonly Action<dynamic?> _setCurrentClient;
+    private dynamic? _huellaCliente;
+    private dynamic? _currentClient;
 
-    public MatchHandler(Func<dynamic?> getHuellaCliente, ApiClient apiClient, Action<dynamic?> setHuellaCliente, Action<dynamic?> setCurrentClient)
+    public MatchHandler(ApiClient apiClient)
     {
-        _getHuellaCliente = getHuellaCliente;
         _apiClient = apiClient;
-        _setHuellaCliente = setHuellaCliente;
-        _setCurrentClient = setCurrentClient;
+    }
+
+    public void Reset()
+    {
+        _huellaCliente = null;
+        _currentClient = null;
     }
 
     public async Task HandleAsync(CaptureResult result, string calidad, byte[] imagen, WebSocket socket)
@@ -37,12 +39,11 @@ internal class MatchHandler : IFingerprintHandler
                 numero = 0
             };
 
-            var huellaCliente = _getHuellaCliente();
-            if (huellaCliente != null)
+            if (_huellaCliente != null)
             {
                 try
                 {
-                    byte[] baHuella = huellaCliente;
+                    byte[] baHuella = _huellaCliente;
 
                     DataResult<Fmd> HuellaBD =
                         Importer.ImportFmd(
@@ -91,26 +92,25 @@ internal class MatchHandler : IFingerprintHandler
         switch (type)
         {
             case "current_client":
-                _setCurrentClient(payload);
+                _currentClient = payload;
                 var bp = payload["BP"]?.ToString();
                 Log.Information("Cliente actual establecido en /match: {BP}", bp);
                 if (!string.IsNullOrEmpty(bp))
                 {
                     Log.Debug("Obteniendo huella del cliente {BP} desde API...", bp);
-                    var huella = await _apiClient.GetHuellaBytesAsync(bp);
-                    _setHuellaCliente(huella);
+                    _huellaCliente = await _apiClient.GetHuellaBytesAsync(bp);
                     var d = new
                     {
                         type = "huella_cliente",
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        existenciaHuellas = huella != null,
+                        existenciaHuellas = _huellaCliente != null,
                         haylector = Adaptador.HayLector()
                     };
-                    if (huella != null)
+                    if (_huellaCliente != null)
                         Log.Information("Huella obtenida correctamente para cliente {BP}", bp);
                     else
                         Log.Warning("No se pudo obtener huella para cliente {BP}", bp);
-                    await socket.sendBytesAsync(ActionClient.SYNC_ESTADO, d);
+                    await socket.sendBytesAsync(ActionClient.PONG, d);
                 }
                 break;
             case "ping":

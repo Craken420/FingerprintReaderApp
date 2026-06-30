@@ -12,15 +12,21 @@ internal class CaptureHandler : IFingerprintHandler
 {
     private readonly PreEnroll _preEnroll;
     private readonly Func<WebSocket?> _getWsqSocket;
-    private readonly Func<dynamic?> _getHuellaCliente;
-    private readonly Action<dynamic?> _setCurrentClient;
+    private readonly ApiClient _apiClient;
+    private dynamic? _huellaCliente;
+    private dynamic? _currentClient;
 
-    public CaptureHandler(PreEnroll preEnroll, Func<WebSocket?> getWsqSocket, Func<dynamic?> getHuellaCliente, Action<dynamic?> setCurrentClient)
+    public CaptureHandler(PreEnroll preEnroll, Func<WebSocket?> getWsqSocket, ApiClient apiClient)
     {
         _preEnroll = preEnroll;
         _getWsqSocket = getWsqSocket;
-        _getHuellaCliente = getHuellaCliente;
-        _setCurrentClient = setCurrentClient;
+        _apiClient = apiClient;
+    }
+
+    public void Reset()
+    {
+        _huellaCliente = null;
+        _currentClient = null;
     }
 
     public async Task HandleAsync(CaptureResult result, string calidad, byte[] imagen, WebSocket socket)
@@ -29,13 +35,8 @@ internal class CaptureHandler : IFingerprintHandler
         {
             var fid = result.Data;
 
-            var otro = new ToDb()
-            {
-                lol = true,
-                correcto = true,
-                mensaje = "Huella excelente"
-            };
-
+            var otro = Adaptador.ToDB(result);
+            
             var response = new ResponseBody()
             {
                 modo = Modo.CAPTURA.ToString(),
@@ -44,7 +45,8 @@ internal class CaptureHandler : IFingerprintHandler
                 Lectura = fid.Bytes,
                 Imagen = imagen,
                 numero = 0,
-                mensaje = otro.mensaje
+                mensaje = otro.mensaje,
+                existenciaHuellas = _huellaCliente != null
             };
 
             if (otro.correcto && otro.lol)
@@ -57,10 +59,9 @@ internal class CaptureHandler : IFingerprintHandler
                 Log.Debug("Huella capturada #{Count}/4 en captura", _preEnroll.Count);
 
                 bool encontrado = false;
-                var huellaCliente = _getHuellaCliente();
-                if (huellaCliente != null)
+                if (_huellaCliente != null)
                 {
-                    encontrado = Adaptador.ExisteHuellaSimilar(result, (byte[])huellaCliente);
+                    encontrado = Adaptador.ExisteHuellaSimilar(result, (byte[])_huellaCliente);
                     if (encontrado)
                         response.mensaje = "La huella coincide con la que se registro anteriormente";
                 }
@@ -130,8 +131,27 @@ internal class CaptureHandler : IFingerprintHandler
                 await socket.sendBytesAsync(ActionClient.PONG, data);
                 break;
             case "current_client":
-                _setCurrentClient(payload);
-                Log.Information("Cliente actual establecido en /capture: {BP}", payload["BP"]);
+                _currentClient = payload;
+                var bp = payload["BP"]?.ToString();
+                Log.Information("Cliente actual establecido en /capture: {BP}", bp);
+                if (!string.IsNullOrEmpty(bp))
+                {
+                    Log.Debug("Obteniendo huella del cliente {BP} desde API...", bp);
+                    _huellaCliente = await _apiClient.GetHuellaBytesAsync(bp);
+                    bool existhuella = _huellaCliente != null;
+                    var d = new
+                    {
+                        type = "huella_cliente",
+                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        existenciaHuellas = existhuella,
+                        haylector = Adaptador.HayLector()
+                    };
+                    if (existhuella)
+                        Log.Information("Huella obtenida correctamente para cliente {BP}", bp);
+                    else
+                        Log.Warning("No se pudo obtener huella para cliente {BP}", bp);
+                    await socket.sendBytesAsync(ActionClient.PONG, d);
+                }
                 break;
         }
     }

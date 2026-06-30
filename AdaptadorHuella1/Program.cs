@@ -33,15 +33,10 @@ WebSocket? wsqSocket = null;
 List<Reader> lectores = new();
 HashSet<string> initializedSerials = new();
 
-dynamic? huellaCliente = null;
-dynamic? currentClient = null;
-
 var handlers = new Dictionary<string, IFingerprintHandler>
 {
-    ["capture"] = new CaptureHandler(pre_enroll, () => wsqSocket, () => huellaCliente,
-        v => { currentClient = v; }),
-    ["match"] = new MatchHandler(() => huellaCliente,
-        new ApiClient(), v => { huellaCliente = v; }, v => { currentClient = v; }),
+    ["capture"] = new CaptureHandler(pre_enroll, () => wsqSocket, new ApiClient()),
+    ["match"] = new MatchHandler(new ApiClient()),
 };
 
 Log.Information("=================================");
@@ -238,6 +233,7 @@ app.Map("/capture", async context =>
 
     captureSocket = await context.WebSockets.AcceptWebSocketAsync();
     pre_enroll.Clear();
+    handlers["capture"].Reset();
     Log.Information("Cliente conectado a /capture");
 
     var buffer = new byte[4096];
@@ -289,8 +285,7 @@ app.Map("/match", async context =>
     }
 
     matchSocket = await context.WebSockets.AcceptWebSocketAsync();
-    huellaCliente = null;
-    currentClient = null;
+    handlers["match"].Reset();
     Log.Information("Cliente conectado a /match");
 
     var buffer = new byte[4096];
@@ -327,7 +322,6 @@ app.Map("/match", async context =>
         }
     }
 
-    huellaCliente = null;
     matchSocket = null;
     Log.Information("Cliente /match desconectado");
 });

@@ -24,6 +24,7 @@ namespace AdaptadorHuella
         public bool correcto;
         public bool lol;
         public string mensaje;
+        public int score;
     }
     public class Adaptador
     {
@@ -74,12 +75,13 @@ namespace AdaptadorHuella
         public static ToDb ToDB(CaptureResult result)
         { //Captura de huella de cliente nuevo
             var data = new ToDb();
-            
+            data.lol = true;
+
             var feature = FeatureExtraction.CreateFmdFromFid(result.Data as Fid, Constants.Formats.Fmd.ANSI);
             if (feature != null)
             {
-                DataResult<Fmd> actual = FeatureExtraction.CreateFmdFromFid(result.Data as Fid, Constants.Formats.Fmd.ANSI);
-                CompareResult Result_Finger = Comparison.Compare(feature.Data, 0, actual.Data, 0);
+                
+                CompareResult Result_Finger = Comparison.Compare(feature.Data, 0, feature.Data, 0);
 
                 if (Result_Finger.Score > 500)
                 {
@@ -90,7 +92,7 @@ namespace AdaptadorHuella
             
 
             NFIQ.NFIQ_SCORE score = NFIQ.GetScore(result.Data as Fid, NFIQ.NFIQ_ALGORITHM.NFIQ_NIST);
-
+            data.score = (int) score;
             switch (score)
             {
                 case NFIQ.NFIQ_SCORE.EXCELLENT:
@@ -150,6 +152,7 @@ namespace AdaptadorHuella
          */
         public string mensaje { get; set; }
         public int Score { get; set; }
+        public bool existenciaHuellas { get; set; }
     }
 
     internal class PreEnroll : System.Collections.Generic.IList<Fmd>

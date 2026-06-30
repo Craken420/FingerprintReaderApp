@@ -8,4 +8,5 @@ internal interface IFingerprintHandler
 {
     Task HandleAsync(CaptureResult result, string calidad, byte[] imagen, WebSocket socket);
     Task HandleMessageAsync(string type, JObject payload, WebSocket socket);
+    void Reset();
 }
